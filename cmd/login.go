@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yovafeng/argocd-game-tools/internal/argocd"
+	"github.com/yafeiaa/argocd-game-tools/internal/argocd"
 )
 
 var loginCmd = &cobra.Command{

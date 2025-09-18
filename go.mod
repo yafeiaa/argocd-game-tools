@@ -1,4 +1,4 @@
-module github.com/yovafeng/argocd-game-tools
+module github.com/yafeiaa/argocd-game-tools
 
 go 1.24.6
 
