@@ -1,6 +1,6 @@
 # argocd-game-tools
 
-一个针对 Argo CD gRPC API 的轻量 CLI。当前提供 `app down` 命令，将应用内可缩容工作负载（Deployment/StatefulSet/GameDeployment/GameStatefulSet）按 SyncWave 逆序依次缩容到 0，并在每个工作负载完成后继续下一个。
+一个针对 Argo CD gRPC API 的轻量 CLI。当前提供 `app down` 命令，将应用内可缩容工作负载（Deployment/StatefulSet/GameDeployment/GameStatefulSet）按 SyncWave 逆序“波次”执行：同一 SyncWave 内并行缩容到 0，波次之间串行等待。
 
 ## 安装
 
@@ -26,6 +26,8 @@ go build -o argocd-game-tools .
 - `--no-grace`/`--grace-period`: 强制删除挂住的 Pod（可指定宽限期）。
 - `--tls-no-verify`: 跳过 TLS 校验（自签证书时常用）。
 - `--grpc-web`: 通过 grpc-web 代理模式连接（在部分 Ingress/反向代理下需要）。
+  
+说明：相同 SyncWave 的资源会并行执行缩容与等待，但不同 SyncWave 将按从高到低的顺序依次进行。
 
 示例：
 

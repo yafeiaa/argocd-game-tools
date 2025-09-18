@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	applications "github.com/argoproj/argo-cd/v2/pkg/apiclient/application"
 	appv1 "github.com/argoproj/argo-cd/v2/pkg/apis/application/v1alpha1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -190,22 +192,63 @@ func isChildNode(tree *appv1.ApplicationTree, node, parent *appv1.ResourceNode) 
 	return false
 }
 
-// ScaleDownBySyncWave 将 app 内可缩容的 workload 按 syncWave 逆序置 0，并串行等待
+// ScaleDownBySyncWave 将 app 内可缩容的 workload 按 syncWave 逆序置 0：
+// - 同一 SyncWave 内并行 Patch 并等待其 Pod 删除
+// - 不同 SyncWave 之间保持顺序，上一波完成后再进行下一波
 func (c *Client) ScaleDownBySyncWave(ctx context.Context, project, appName string, noGrace bool, gracePeriod int64) error {
 	fmt.Printf("Start scale down app=%s project=%s\n", appName, project)
 	workloads, err := c.getAppWorkloads(ctx, project, appName)
 	if err != nil {
 		return err
 	}
-	for i := range workloads {
-		w := workloads[i]
-		if err := c.patchWorkloadReplicasZero(ctx, project, appName, &w); err != nil {
-			return fmt.Errorf("patch %s/%s/%s replicas=0: %w", w.Kind, w.Namespace, w.Name, err)
+	// 将 workloads（已按 SyncWave 降序）分组
+	var groups [][]appv1.ResourceStatus
+	if len(workloads) > 0 {
+		currentWave := workloads[0].SyncWave
+		var buf []appv1.ResourceStatus
+		for i := range workloads {
+			w := workloads[i]
+			if w.SyncWave != currentWave {
+				// 推入上一组
+				if len(buf) > 0 {
+					groups = append(groups, buf)
+				}
+				buf = nil
+				currentWave = w.SyncWave
+			}
+			buf = append(buf, w)
 		}
-		if err := c.waitPodsDeleted(ctx, project, appName, &w, noGrace, gracePeriod); err != nil {
-			return fmt.Errorf("wait pods deleted for %s/%s/%s: %w", w.Kind, w.Namespace, w.Name, err)
+		if len(buf) > 0 {
+			groups = append(groups, buf)
 		}
-		fmt.Printf("Scaled down: %s %s/%s\n", w.Kind, w.Namespace, w.Name)
+	}
+
+	// 按波次执行：同波并行，波次之间串行
+	for _, group := range groups {
+		if len(group) == 0 {
+			continue
+		}
+		wave := group[0].SyncWave
+		fmt.Printf("Processing wave=%d with %d workloads in parallel\n", wave, len(group))
+		g, gctx := errgroup.WithContext(ctx)
+		for i := range group {
+			w := group[i]
+			wCopy := w
+			g.Go(func() error {
+				if err := c.patchWorkloadReplicasZero(gctx, project, appName, &wCopy); err != nil {
+					return fmt.Errorf("patch %s/%s/%s replicas=0: %w", wCopy.Kind, wCopy.Namespace, wCopy.Name, err)
+				}
+				if err := c.waitPodsDeleted(gctx, project, appName, &wCopy, noGrace, gracePeriod); err != nil {
+					return fmt.Errorf("wait pods deleted for %s/%s/%s: %w", wCopy.Kind, wCopy.Namespace, wCopy.Name, err)
+				}
+				fmt.Printf("Scaled down: %s %s/%s\n", wCopy.Kind, wCopy.Namespace, wCopy.Name)
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return err
+		}
+		fmt.Printf("Wave %d completed\n", wave)
 	}
 	fmt.Println("Scale down finished")
 	return nil
